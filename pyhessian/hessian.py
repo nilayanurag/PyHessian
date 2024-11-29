@@ -22,8 +22,8 @@ import torch
 import math
 from torch.autograd import Variable
 import numpy as np
-
-from pyhessian.utils import group_product, group_add, normalization, get_params_grad, hessian_vector_product, orthnormal
+from third_party.PyHessian.pyhessian.utils import group_product, group_add, normalization, get_params_grad, hessian_vector_product, orthnormal
+# from pyhessian.utils import group_product, group_add, normalization, get_params_grad, hessian_vector_product, orthnormal
 
 
 class hessian():
@@ -34,7 +34,7 @@ class hessian():
         iii) the estimated eigenvalue density
     """
 
-    def __init__(self, model, criterion, data=None, dataloader=None, cuda=True):
+    def __init__(self, model, criterion, data=None, dataloader=None, cuda=True,loss_callback=None,device="cpu"):
         """
         model: the model that needs Hessain information
         criterion: the loss function
@@ -43,35 +43,40 @@ class hessian():
         """
 
         # make sure we either pass a single batch or a dataloader
-        assert (data != None and dataloader == None) or (data == None and
-                                                         dataloader != None)
+        # assert (data != None and dataloader == None) or (data == None and
+        #                                                  dataloader != None)
 
         self.model = model.eval()  # make model is in evaluation model
         self.criterion = criterion
+        self.loss_callback = loss_callback
+        self.device=device
+        self.full_dataset = True
+        # if data != None:
+        #     self.data = data
+        #     self.full_dataset = False
+        # else:
+        #     self.data = dataloader
+        #     self.full_dataset = True
 
-        if data != None:
-            self.data = data
-            self.full_dataset = False
-        else:
-            self.data = dataloader
-            self.full_dataset = True
-
-        if cuda:
-            self.device = 'cuda'
-        else:
-            self.device = 'cpu'
 
         # pre-processing for single batch case to simplify the computation.
-        if not self.full_dataset:
-            self.inputs, self.targets = self.data
-            if self.device == 'cuda':
-                self.inputs, self.targets = self.inputs.cuda(
-                ), self.targets.cuda()
+        # if not self.full_dataset:
+        #     self.inputs, self.targets = self.data
+        #     if self.device == 'cuda':
+        #         self.inputs, self.targets = self.inputs.cuda(
+        #         ), self.targets.cuda()
 
             # if we only compute the Hessian information for a single batch data, we can re-use the gradients.
-            outputs = self.model(self.inputs)
-            loss = self.criterion(outputs, self.targets)
-            loss.backward(create_graph=True)
+            # if loss_callback is not None:
+            #     loss = loss_callback()
+            #     loss.backward(create_graph=True)
+            # else:
+            #     outputs = self.model(self.inputs)
+            #     loss = self.criterion(outputs, self.targets)
+            #     loss.backward(create_graph=True)
+
+        loss = self.loss_callback(self.model)
+        loss.backward(create_graph=True)
 
         # this step is used to extract the parameters from the model
         params, gradsH = get_params_grad(self.model)
@@ -81,28 +86,49 @@ class hessian():
     def dataloader_hv_product(self, v):
 
         device = self.device
-        num_data = 0  # count the number of datum points in the dataloader
+        num_data = 0 # count the number of datum points in the dataloader
 
         THv = [torch.zeros(p.size()).to(device) for p in self.params
               ]  # accumulate result
-        for inputs, targets in self.data:
-            self.model.zero_grad()
-            tmp_num_data = inputs.size(0)
-            outputs = self.model(inputs.to(device))
-            loss = self.criterion(outputs, targets.to(device))
-            loss.backward(create_graph=True)
-            params, gradsH = get_params_grad(self.model)
-            self.model.zero_grad()
-            Hv = torch.autograd.grad(gradsH,
-                                     params,
-                                     grad_outputs=v,
-                                     only_inputs=True,
-                                     retain_graph=False)
-            THv = [
-                THv1 + Hv1 * float(tmp_num_data) + 0.
-                for THv1, Hv1 in zip(THv, Hv)
-            ]
-            num_data += float(tmp_num_data)
+        tmp_num_data=1000
+        self.model.zero_grad()
+        loss=self.loss_callback(self.model)
+        loss.backward(create_graph=True)
+        params, gradsH = get_params_grad(self.model)
+        self.model.zero_grad()
+        Hv = torch.autograd.grad(gradsH,
+                                 params,
+                                 grad_outputs=v,
+                                 only_inputs=True,
+                                 retain_graph=False)
+        THv = [
+            THv1 + Hv1 * float(tmp_num_data) + 0.
+            for THv1, Hv1 in zip(THv, Hv)
+        ]
+        num_data += float(tmp_num_data)
+
+
+
+
+
+        # for inputs, targets in self.data:
+        #     self.model.zero_grad()
+        #     tmp_num_data = inputs.size(0)
+        #     outputs = self.model(inputs.to(device))
+        #     loss = self.criterion(outputs, targets.to(device))
+        #     loss.backward(create_graph=True)
+        #     params, gradsH = get_params_grad(self.model)
+        #     self.model.zero_grad()
+        #     Hv = torch.autograd.grad(gradsH,
+        #                              params,
+        #                              grad_outputs=v,
+        #                              only_inputs=True,
+        #                              retain_graph=False)
+        #     THv = [
+        #         THv1 + Hv1 * float(tmp_num_data) + 0.
+        #         for THv1, Hv1 in zip(THv, Hv)
+        #     ]
+        #     num_data += float(tmp_num_data)
 
         THv = [THv1 / float(num_data) for THv1 in THv]
         eigenvalue = group_product(THv, v).cpu().item()
